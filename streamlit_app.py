@@ -97,7 +97,7 @@ st.markdown(
 
 # loading DATA
 DATA_URL = (
-    "https://github.com/rshaw13/au_bess_map.git/refs/heads/main/data/latest_bess_data.csv"
+    "https://raw.githubusercontent.com/rshaw13/au_bess_map/refs/heads/main/data/latest_bess_data.csv"
 )
 
 @st.cache_data(ttl=300)
