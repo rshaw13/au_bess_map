@@ -133,6 +133,14 @@ st.markdown(
         margin-bottom: 8px;
     }
 
+    .metric-subtle {
+        color: var(--muted);
+        font-size: 0.78rem;
+        font-weight: 500;
+        margin-left: 6px;
+        white-space: nowrap;
+    }
+
     .metric-value {
         color: var(--accent);
         font-size: clamp(2.1rem, 4vw, 3.4rem);
@@ -323,8 +331,18 @@ if not asset_options:
     st.error("No valid BESS asset labels found in latest_bess_data.csv.")
     st.stop()
 
+# Default to Waratah Super Battery where present; otherwise use the first asset alphabetically.
+def find_default_asset(options):
+    for option in options:
+        if "waratah" in str(option).lower() and "super" in str(option).lower():
+            return option
+    for option in options:
+        if "waratah" in str(option).lower():
+            return option
+    return options[0]
+
 if "selected_bess_asset" not in st.session_state or st.session_state["selected_bess_asset"] not in asset_options:
-    st.session_state["selected_bess_asset"] = asset_options[0]
+    st.session_state["selected_bess_asset"] = find_default_asset(asset_options)
 
 selected_label = st.session_state["selected_bess_asset"]
 
@@ -333,7 +351,7 @@ st.markdown(
     """
     <div class="hero-wrap">
         <div class="hero">
-            <h1><span class="highlight">Australian</span> BESS<br>live dispatch</h1>
+            <h1><span class="highlight">Australian</span> BESS<br>live dispatch map</h1>
         </div>
     </div>
     """,
@@ -355,6 +373,7 @@ st.markdown(
 charging_mw = df.loc[df["SIGNED_MW"] < -1, "ABS_MW"].sum()
 discharging_mw = df.loc[df["SIGNED_MW"] > 1, "ABS_MW"].sum()
 idle_count = int((df["BESS_STATE"] == "Idle").sum())
+total_bess_assets = int(df["asset_label"].nunique())
 
 st.markdown(
     f"""
@@ -370,7 +389,7 @@ st.markdown(
                 <div class="metric-value">{charging_mw:,.1f} MW</div>
             </div>
             <div class="metric-card">
-                <div class="metric-label">Idle / near idle assets</div>
+                <div class="metric-label">Idle / near idle assets <span class="metric-subtle">of {total_bess_assets} total BESS assets</span></div>
                 <div class="metric-value">{idle_count}</div>
             </div>
         </div>
@@ -389,21 +408,83 @@ def state_colour(state: str, is_selected: bool = False) -> str:
         return "#f4d8cf"   # light cream = importing/charging, still inside palette
     return "#a46a5f"       # muted = idle
 
+
+def safe_float(value, default=0.0) -> float:
+    """Avoid NaN marker radii, which can break the Folium/Leaflet render."""
+    try:
+        value = float(value)
+        if pd.isna(value):
+            return default
+        return value
+    except Exception:
+        return default
+
 m = folium.Map(
     location=[-30, 145],
-    zoom_start=4.5,
-    tiles="CartoDB positron",
+    zoom_start=4,
+    tiles=None,
     width="100%",
     height="100%",
+    prefer_canvas=True,
 )
+
+# Explicit basemap rather than Folium's named shortcut. This is more reliable in Streamlit Cloud.
+folium.TileLayer(
+    tiles="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+    attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    name="Warm base map",
+    overlay=False,
+    control=False,
+).add_to(m)
+
+# CSS must be injected into the Folium iframe itself. Streamlit page CSS cannot reliably style Leaflet internals.
+map_css = """
+<style>
+.leaflet-container {
+    background: #351411 !important;
+    font-family: 'Inter', Arial, sans-serif !important;
+}
+.leaflet-tile-pane img {
+    filter: sepia(88%) hue-rotate(320deg) saturate(1.9) contrast(1.2) brightness(0.78) !important;
+}
+.leaflet-popup-content-wrapper {
+    background: #4b1b17 !important;
+    color: #f4d8cf !important;
+    border: 1px solid rgba(255, 105, 56, 0.7) !important;
+    border-radius: 13px !important;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.38) !important;
+}
+.leaflet-popup-content {
+    width: max-content !important;
+    min-width: 300px !important;
+    max-width: 560px !important;
+    margin: 14px 16px !important;
+    line-height: 1.45 !important;
+    white-space: nowrap !important;
+    font-family: 'Inter', Arial, sans-serif !important;
+    font-size: 13px !important;
+}
+.leaflet-popup-tip {
+    background: #4b1b17 !important;
+}
+</style>
+"""
+m.get_root().html.add_child(folium.Element(map_css))
 
 scale = 0.10
 min_radius = 4
 
 for _, row in df.iterrows():
     is_selected = row["asset_label"] == selected_label
-    marker_radius = max(min_radius, float(row["ABS_MW"] or 0) * scale)
-    capacity_radius = max(min_radius + 2, float(row["MAX_DISCHARGE_MW"] or 0) * scale)
+    abs_mw = safe_float(row.get("ABS_MW"), 0.0)
+    discharge_cap = safe_float(row.get("MAX_DISCHARGE_MW"), 0.0)
+    marker_radius = max(min_radius, abs_mw * scale)
+    capacity_radius = max(min_radius + 2, discharge_cap * scale)
+
+    signed_mw = safe_float(row.get("SIGNED_MW"), 0.0)
+    charge_cap = safe_float(row.get("MAX_CHARGE_MW"), 0.0)
+    storage_mwh = safe_float(row.get("STORAGE_MWH"), 0.0)
+    utilisation = safe_float(row.get("utilisation_pct"), 0.0)
 
     popup_html = f"""
     <div class="bess-popup">
@@ -411,14 +492,14 @@ for _, row in df.iterrows():
         <div><b>DUID:</b> {row['DUID']}</div>
         <div><b>Region:</b> {row['Region']}</div>
         <div><b>State:</b> {row['BESS_STATE']}</div>
-        <div><b>Signed dispatch:</b> {row['SIGNED_MW']:.1f} MW</div>
-        <div><b>Discharge capacity:</b> {row['MAX_DISCHARGE_MW']:.1f} MW</div>
-        <div><b>Charge capacity:</b> {row['MAX_CHARGE_MW']:.1f} MW</div>
-        <div><b>Storage:</b> {row['STORAGE_MWH']:.1f} MWh</div>
-        <div><b>Utilisation:</b> {row['utilisation_pct']:.1f}%</div>
+        <div><b>Signed dispatch:</b> {signed_mw:.1f} MW</div>
+        <div><b>Discharge capacity:</b> {discharge_cap:.1f} MW</div>
+        <div><b>Charge capacity:</b> {charge_cap:.1f} MW</div>
+        <div><b>Storage:</b> {storage_mwh:.1f} MWh</div>
+        <div><b>Utilisation:</b> {utilisation:.1f}%</div>
     </div>
     """
-    popup = folium.Popup(popup_html, max_width=520, min_width=285)
+    popup = folium.Popup(popup_html, max_width=560, min_width=300)
 
     folium.CircleMarker(
         location=[row["Latitude"], row["Longitude"]],
@@ -443,6 +524,14 @@ for _, row in df.iterrows():
         tooltip=row["asset_label"],
         popup=popup,
     ).add_to(m)
+
+# Keep Australia in view and avoid a blank-looking map if all assets are clustered.
+try:
+    bounds = df[["Latitude", "Longitude"]].dropna().values.tolist()
+    if bounds:
+        m.fit_bounds(bounds, padding=(30, 30))
+except Exception:
+    pass
 
 map_data = st_folium(
     m,
