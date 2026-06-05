@@ -32,5 +32,8 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
           git add data/latest_bess_data.csv
+          git add data/bess_history_24h.csv
+          git add data/latest_regional_market_data.csv
+          git add data/regional_market_history_24h.csv
           git commit -m "Auto update wind data" || echo "No changes"
           git push
