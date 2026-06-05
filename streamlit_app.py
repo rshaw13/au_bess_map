@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import folium
-from streamlit_folium import st_folium
+import streamlit.components.v1 as components
 from pathlib import Path
 
 # ---------------- PAGE CONFIG ----------------
@@ -420,22 +420,14 @@ def safe_float(value, default=0.0) -> float:
         return default
 
 m = folium.Map(
-    location=[-30, 145],
+    location=[-27.5, 134.5],
     zoom_start=4,
-    tiles=None,
+    tiles="OpenStreetMap",
     width="100%",
-    height="100%",
+    height="600px",
     prefer_canvas=True,
+    control_scale=True,
 )
-
-# Explicit basemap rather than Folium's named shortcut. This is more reliable in Streamlit Cloud.
-folium.TileLayer(
-    tiles="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
-    attr='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-    name="Warm base map",
-    overlay=False,
-    control=False,
-).add_to(m)
 
 # CSS must be injected into the Folium iframe itself. Streamlit page CSS cannot reliably style Leaflet internals.
 map_css = """
@@ -533,11 +525,14 @@ try:
 except Exception:
     pass
 
-map_data = st_folium(
-    m,
-    width=None,
-    height=450 if st.session_state.get("is_mobile", False) else 600,
-    key="bess_map",
+# Render Folium directly as HTML instead of using st_folium.
+# This avoids a common Streamlit Cloud issue where the Leaflet map iframe mounts
+# but stays blank.
+map_height = 450 if st.session_state.get("is_mobile", False) else 600
+components.html(
+    m.get_root().render(),
+    height=map_height + 20,
+    scrolling=False,
 )
 
 st.caption(
