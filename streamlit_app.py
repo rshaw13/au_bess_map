@@ -12,32 +12,27 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    /* Import font correctly */
     @import url('https://fonts.googleapis.com');
 
-    /* Global Font */
     .stMarkdown, p, label, .stSelectbox {
             font-family: "Inter", sans-serif !important;
     }
 
-    /* Background Gradient */
     .stApp {
         background: RGBA(68, 159, 186, 1);
         background: linear-gradient(180deg, rgba(68, 159, 186, 0.9) 7%, rgba(239, 208, 187, 0.9) 86%);
         background-attachment: fixed;
     }
 
-    /* Hero banner - Gradient */
     .hero {
         background: linear-gradient(90deg, rgba(225, 169, 131, 1) 9%, rgba(202, 94, 47, 1) 67%); 
-        padding: 60px 40px;
+        padding: 30px 20px;
         border-radius: 12px;
         margin-bottom: 25px;
         text-align: center;
         background-size: cover;
         background-position: center;
         box-shadow: 2px 4px 14px 5px rgba(86,47,20,0.39);
-        padding: 30px 20px;
     }
 
     .hero h1 {
@@ -60,13 +55,12 @@ st.markdown(
     }
 
     .custom-text {
-        color: #0a0a0a;
-        font-size: 22px;
+        color: #31333F; 
+        font-size: 35px;
         font-weight: bold;
         margin-top: 20px;
     }
     
-  /* Style the HTML table to look like Streamlit's */
     .custom-table {
         width: 100%;
         border-collapse: collapse;
@@ -87,28 +81,15 @@ st.markdown(
         color: #31333F;
     }
 
-    /* Target the wind tiles specifically */
-    /* This filter chain turns the rainbow tiles into a soft peach/orange tint */
-    .leaflet-tile-pane .leaflet-layer:nth-child(2) img {
-        filter: grayscale(100%) sepia(100%) hue-rotate(330deg) saturate(2) brightness(1.1) !important;
-        mix-blend-mode: multiply; /* Helps the color blend into the map */
-    }
-
-    /* Alternative for a Blue tint (#449FBA):
-       filter: grayscale(100%) sepia(100%) hue-rotate(160deg) saturate(3) brightness(0.8) !important;
-    */
-
-    /* Mobile only */
     @media (max-width: 768px) {
         .table-wrapper {
             overflow-x: auto;
             -webkit-overflow-scrolling: touch;
         }
-
         .custom-table {
-            min-width: 600px;
+            min-width: 700px;
+        }
     }
-
     </style>
     """,
     unsafe_allow_html=True
@@ -116,19 +97,26 @@ st.markdown(
 
 # loading DATA
 DATA_URL = (
-    "https://raw.githubusercontent.com/rshaw13/au_wind_map/refs/heads/main/data/latest_wind_data.csv"
+    "https://github.com/rshaw13/au_bess_map.git/refs/heads/main/data/latest_bess_data.csv"
 )
+
 @st.cache_data(ttl=300)
 def load_data():
     return pd.read_csv(DATA_URL)
 
+
 df = load_data()
+
+# Defensive cleanup
+if df.empty:
+    st.error("No BESS data found. Run update_data.py first and check data/latest_bess_data.csv was created.")
+    st.stop()
 
 # title and linkedin caption
 st.markdown(
     """
     <div class="hero">
-        <h1>Australian Windfarm Output Map</h1>
+        <h1>Australian BESS Live Dispatch Map</h1>
     </div>
     """,
     unsafe_allow_html=True
@@ -150,25 +138,25 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# title for map section
-st.markdown("""
-<style>
-.custom-text {
-    color: #31333F; 
-    font-size: 35px;
-}
-</style>
-<p class="custom-text"><strong>Current Plant Output Map</strong></p>
-""", unsafe_allow_html=True)
+st.markdown('<p class="custom-text"><strong>Current Battery Dispatch Map</strong></p>', unsafe_allow_html=True)
 
-# wind farm selector
-selected_name = st.selectbox(
-    "Hover over a plant on the map to find its name, then use the drop-down to select a wind farm for output information in the table below.",
-    df["Station Name"].sort_values().unique()
+# Top-level commercial summary
+charging_mw = df.loc[df["SIGNED_MW"] < -1, "ABS_MW"].sum()
+discharging_mw = df.loc[df["SIGNED_MW"] > 1, "ABS_MW"].sum()
+idle_count = (df["BESS_STATE"] == "Idle").sum()
+
+col1, col2, col3 = st.columns(3)
+col1.metric("Total discharging", f"{discharging_mw:,.1f} MW")
+col2.metric("Total charging", f"{charging_mw:,.1f} MW")
+col3.metric("Idle / near idle assets", f"{idle_count}")
+
+# BESS selector
+selected_label = st.selectbox(
+    "Hover over a battery on the map to find its name, then use the drop-down to select a BESS asset for dispatch information below.",
+    df["asset_label"].sort_values().unique()
 )
 
-selected_row = df[df["Station Name"] == selected_name].iloc[0]
-
+selected_row = df[df["asset_label"] == selected_label].iloc[0]
 
 # setting up folium map
 m = folium.Map(
@@ -179,64 +167,61 @@ m = folium.Map(
     height='100%'
 )
 
-scale = 0.15
-openweathermap_api_key = st.secrets["OPENWEATHERMAP_API_KEY"]
+# BESS output is often small relative to capacity, so used a base radius.
+# Marker fill radius = actual abs MW. Ring radius = max discharge capacity.
+scale = 0.10
+min_radius = 4
 
-# wind layer
-wind_tiles = (
-    "https://tile.openweathermap.org/map/wind_new/{z}/{x}/{y}.png"
-    f"?appid={openweathermap_api_key}"
+def state_colour(state: str, is_selected: bool = False) -> str:
+    if is_selected:
+        return "#FC0C3B"
+    if state == "Discharging":
+        return "#ca5e2f"   # orange/red = exporting
+    if state == "Charging":
+        return "#449fba"   # blue = importing/charging
+    return "#808080"       # grey = idle
 
-)
-
-folium.raster_layers.TileLayer(
-    tiles=wind_tiles,
-    attr="OpenWeatherMap",
-    name="Wind",
-    overlay=True,
-    control=True,
-    opacity=0.9,
-).add_to(m)
-
-folium.LayerControl().add_to(m)
-
-# wind farm markers
-
+# BESS markers
 for _, row in df.iterrows():
-
-    is_selected = row["Station Name"] == selected_name
+    is_selected = row["asset_label"] == selected_label
+    marker_radius = max(min_radius, row["ABS_MW"] * scale)
+    capacity_radius = max(min_radius + 2, row["MAX_DISCHARGE_MW"] * scale)
 
     popup_text = f"""
         <b>{row['Station Name']}</b><br>
-        Output: {row['SCADAVALUE']} MW<br>
-        Capacity: {row['MAX_CAP']} MW<br>
+        DUID: {row['DUID']}<br>
+        Region: {row['Region']}<br>
+        State: {row['BESS_STATE']}<br>
+        Signed dispatch: {row['SIGNED_MW']:.1f} MW<br>
+        Discharge capacity: {row['MAX_DISCHARGE_MW']:.1f} MW<br>
+        Charge capacity: {row['MAX_CHARGE_MW']:.1f} MW<br>
+        Storage: {row['STORAGE_MWH']:.1f} MWh<br>
         Utilisation: {row['utilisation_pct']:.1f}%
         """
 
-    # Actual output
+    # Actual active MW marker
     folium.CircleMarker(
         location=[row["Latitude"], row["Longitude"]],
-        radius=row["SCADAVALUE"] * scale,
+        radius=marker_radius,
         fill=True,
-        fill_opacity=0.5,
-        fill_color="#FC0C3B" if is_selected else (
-            "#449fba" if row["utilisation_pct"] > 50 else "#ca5e2f"
-        ),
-        stroke=False,
-        tooltip=row['Station Name'],
+        fill_opacity=0.65,
+        fill_color=state_colour(row["BESS_STATE"], is_selected),
+        color=state_colour(row["BESS_STATE"], is_selected),
+        weight=1,
+        tooltip=row['asset_label'],
         popup=popup_text,
     ).add_to(m)
 
     # Capacity ring
     folium.CircleMarker(
         location=[row["Latitude"], row["Longitude"]],
-        radius=row["MAX_CAP"] * scale,
+        radius=capacity_radius,
         color="gray",
         weight=1,
         fill=True,
-        fill_opacity=0.2 if is_selected else 0,
+        fill_opacity=0.18 if is_selected else 0,
         fill_color="#FC0C3B",
-        tooltip=row['Station Name'],
+        tooltip=row['asset_label'],
         popup=popup_text,
     ).add_to(m)
 
@@ -245,31 +230,36 @@ map_data = st_folium(
     m,
     width=None,
     height=450 if st.session_state.get("is_mobile", False) else 600,
-    key="wind_map",
+    key="bess_map",
 )
 
+st.caption(
+    f"Last update (Aus Time): {df['SETTLEMENTDATE'].iloc[0]} - latest public AEMO Dispatch_SCADA data can lag real time. "
+    "Positive MW = discharging/exporting; negative MW = charging/importing."
+)
 
-st.caption(f"Last update (Aus Time): {df['SETTLEMENTDATE'].iloc[0]} - (Latest published AEMO data is 1 hour behind current)")
-
-
-# selection-specific farm data table
+# selection-specific BESS data table
 table_df = pd.DataFrame([{
-    "Wind Farm": str(selected_row["Station Name"]),
+    "BESS Asset": str(selected_row["Station Name"]),
     "DUID": str(selected_row["DUID"]),
-    "Output (MW)": float(round(selected_row["SCADAVALUE"],1)),
-    "Capacity (MW)": float(round(selected_row["MAX_CAP"],1)),
+    "Region": str(selected_row["Region"]),
+    "State": str(selected_row["BESS_STATE"]),
+    "Signed Dispatch (MW)": float(round(selected_row["SIGNED_MW"], 1)),
+    "Abs Dispatch (MW)": float(round(selected_row["ABS_MW"], 1)),
+    "Discharge Capacity (MW)": float(round(selected_row["MAX_DISCHARGE_MW"], 1)),
+    "Charge Capacity (MW)": float(round(selected_row["MAX_CHARGE_MW"], 1)),
+    "Storage Capacity (MWh)": float(round(selected_row["STORAGE_MWH"], 1)),
     "Utilisation (%)": float(round(selected_row["utilisation_pct"], 0)),
     "Last Update (Aus Time)": str(selected_row["SETTLEMENTDATE"]),
 }])
 
-# forcing as object dtype then making bare html for streamlit
 table_df = table_df.astype(object)
 table_html = table_df.to_html(index=False, classes='custom-table')
 
 st.markdown(
     f"""
     <div class="content-card">
-        <h3 style="color: #31333F;">Selected Wind Farm Details</h3>
+        <h3 style="color: #31333F;">Selected BESS Asset Details</h3>
         <div class="table-wrapper">
             {table_html}
         </div>
@@ -277,3 +267,37 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
+# Simple leaderboard to add commercial flavour without changing the data pipeline
+leaderboard = df[[
+    "asset_label",
+    "Region",
+    "BESS_STATE",
+    "SIGNED_MW",
+    "ABS_MW",
+    "MAX_DISCHARGE_MW",
+    "MAX_CHARGE_MW",
+    "STORAGE_MWH",
+    "utilisation_pct",
+]].sort_values("ABS_MW", ascending=False).head(10)
+
+leaderboard = leaderboard.rename(columns={
+    "asset_label": "Asset",
+    "BESS_STATE": "State",
+    "SIGNED_MW": "Signed MW",
+    "ABS_MW": "Abs MW",
+    "MAX_DISCHARGE_MW": "Discharge MW",
+    "MAX_CHARGE_MW": "Charge MW",
+    "STORAGE_MWH": "Storage MWh",
+    "utilisation_pct": "Utilisation %",
+})
+
+st.markdown(
+    """
+    <div class="content-card">
+        <h3 style="color: #31333F;">Most Active BESS Assets Right Now</h3>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+st.dataframe(leaderboard, use_container_width=True, hide_index=True)
