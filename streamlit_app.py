@@ -2,230 +2,448 @@ import streamlit as st
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
+from pathlib import Path
 
-# styling
+# ---------------- PAGE CONFIG ----------------
 st.set_page_config(
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="collapsed",
+    page_title="Australian BESS Dispatch Map",
 )
 
+# ---------------- STYLING ----------------
 st.markdown(
     """
     <style>
-    @import url('https://fonts.googleapis.com');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Cormorant+Garamond:wght@500;600;700&display=swap');
 
-    .stMarkdown, p, label, .stSelectbox {
-            font-family: "Inter", sans-serif !important;
+    :root {
+        --bg-deep: #421815;
+        --bg-mid: #55201b;
+        --card: #662820;
+        --card-soft: #743027;
+        --accent: #ff6938;
+        --accent-soft: #e58a65;
+        --cream: #f4d8cf;
+        --muted: #d6a095;
+        --line: rgba(255, 105, 56, 0.55);
+    }
+
+    html, body, [class*="css"] {
+        font-family: 'Inter', sans-serif !important;
     }
 
     .stApp {
-        background: RGBA(68, 159, 186, 1);
-        background: linear-gradient(180deg, rgba(68, 159, 186, 0.9) 7%, rgba(239, 208, 187, 0.9) 86%);
+        background:
+            radial-gradient(circle at 22% 16%, rgba(255, 105, 56, 0.12), transparent 26%),
+            radial-gradient(circle at 86% 72%, rgba(255, 105, 56, 0.10), transparent 30%),
+            linear-gradient(180deg, #421815 0%, #4b1b17 52%, #32100f 100%);
         background-attachment: fixed;
+        color: var(--cream);
+    }
+
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 3rem;
+        max-width: 1220px;
+    }
+
+    /* Main compact title box */
+    .hero-wrap {
+        text-align: center;
+        margin: 0.5rem 0 1rem 0;
     }
 
     .hero {
-        background: linear-gradient(90deg, rgba(225, 169, 131, 1) 9%, rgba(202, 94, 47, 1) 67%); 
-        padding: 30px 20px;
-        border-radius: 12px;
-        margin-bottom: 25px;
-        text-align: center;
-        background-size: cover;
-        background-position: center;
-        box-shadow: 2px 4px 14px 5px rgba(86,47,20,0.39);
+        display: inline-block;
+        width: auto;
+        max-width: 980px;
+        padding: 18px 42px 20px 42px;
+        border: 1px solid var(--line);
+        border-radius: 22px;
+        background: rgba(66, 24, 21, 0.72);
+        box-shadow: 0 16px 45px rgba(0, 0, 0, 0.28);
     }
 
     .hero h1 {
-        color: #EFD0BB;
-        font-family: 'Garamond', serif;
+        color: var(--cream);
+        font-family: 'Cormorant Garamond', serif !important;
         font-weight: 700;
-        font-size: 2.2rem; 
+        font-size: clamp(2.5rem, 6vw, 5.2rem);
+        line-height: 0.92;
+        letter-spacing: -0.04em;
         margin: 0;
-        text-shadow: 2px 4px 14px 5px rgba(86,47,20,0.39);
+    }
+
+    .hero .highlight {
+        color: var(--accent);
+    }
+
+    .subheader-bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 1rem;
+        margin: 0 0 1rem 0;
+        color: var(--muted);
+        font-size: 0.9rem;
+    }
+
+    .subheader-bar a {
+        color: var(--accent);
+        text-decoration: none;
+        font-weight: 600;
+    }
+
+    /* Top charging/discharging summary box */
+    .status-panel {
+        border: 1px solid var(--line);
+        background: rgba(84, 32, 27, 0.78);
+        border-radius: 20px;
+        padding: 18px;
+        margin: 16px 0 22px 0;
+        box-shadow: 0 16px 38px rgba(0, 0, 0, 0.24);
+    }
+
+    .status-title {
+        font-family: 'Cormorant Garamond', serif !important;
+        color: var(--cream);
+        font-size: 2rem;
+        line-height: 1;
+        margin-bottom: 14px;
+    }
+
+    .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+    }
+
+    .metric-card {
+        background: rgba(108, 43, 35, 0.92);
+        border: 1px solid rgba(255, 105, 56, 0.22);
+        border-radius: 14px;
+        padding: 18px 20px;
+    }
+
+    .metric-label {
+        color: var(--cream);
+        opacity: 0.9;
+        font-size: 1rem;
+        margin-bottom: 8px;
+    }
+
+    .metric-value {
+        color: var(--accent);
+        font-size: clamp(2.1rem, 4vw, 3.4rem);
+        font-weight: 700;
+        line-height: 1;
+        letter-spacing: -0.04em;
     }
 
     .content-card {
-        background-color: white !important;
-        padding: 15px;
-        border-radius: 15px;
-        box-shadow: 0px 4px 15px rgba(0, 0, 0, 0.2);
+        background: rgba(99, 39, 32, 0.86) !important;
+        border: 1px solid rgba(255, 105, 56, 0.35);
+        padding: 18px;
+        border-radius: 18px;
+        box-shadow: 0 15px 38px rgba(0, 0, 0, 0.22);
         margin-bottom: 20px;
-        color: #31333F !important;
+        color: var(--cream) !important;
         overflow-x: auto;
     }
 
-    .custom-text {
-        color: #31333F; 
-        font-size: 35px;
-        font-weight: bold;
-        margin-top: 20px;
+    .section-title {
+        color: var(--cream);
+        font-family: 'Cormorant Garamond', serif !important;
+        font-size: 2.2rem;
+        font-weight: 700;
+        line-height: 1;
+        margin: 22px 0 8px 0;
     }
-    
+
+    .section-title .highlight {
+        color: var(--accent);
+    }
+
+    .selector-help {
+        color: var(--muted);
+        font-size: 0.95rem;
+        margin: 0 0 8px 0;
+    }
+
+    /* Streamlit widgets */
+    label, .stSelectbox label, .stMarkdown, p, span, div {
+        font-family: 'Inter', sans-serif !important;
+    }
+
+    div[data-baseweb="select"] > div {
+        background-color: rgba(108, 43, 35, 0.94) !important;
+        border: 1px solid rgba(255, 105, 56, 0.45) !important;
+        border-radius: 12px !important;
+        color: var(--cream) !important;
+    }
+
+    div[data-baseweb="select"] span {
+        color: var(--cream) !important;
+    }
+
+    /* Tables */
     .custom-table {
         width: 100%;
-        border-collapse: collapse;
+        border-collapse: separate;
+        border-spacing: 0;
         margin-top: 10px;
+        overflow: hidden;
+        border-radius: 12px;
+        font-size: 0.94rem;
     }
+
     .custom-table th {
         text-align: left;
-        padding: 12px 8px;
-        background-color: #e1a983;
-        color: black;
-        border-bottom: 2px solid #f0f2f6;
-        width: 100%;
-        table-layout: auto;
+        padding: 13px 10px;
+        background-color: rgba(255, 105, 56, 0.18);
+        color: var(--cream);
+        border-bottom: 1px solid rgba(255, 105, 56, 0.28);
+        white-space: nowrap;
     }
+
     .custom-table td {
-        padding: 12px 8px;
-        border-bottom: 1px solid #f0f2f6;
-        color: #31333F;
+        padding: 13px 10px;
+        border-bottom: 1px solid rgba(255, 105, 56, 0.14);
+        color: var(--cream);
+        white-space: nowrap;
+    }
+
+    .stDataFrame {
+        border: 1px solid rgba(255, 105, 56, 0.25);
+        border-radius: 15px;
+        overflow: hidden;
+    }
+
+    /* Map container and warm colour filter for the basemap */
+    iframe {
+        border-radius: 18px !important;
+    }
+
+    .st-key-bess_map, div[data-testid="stIFrame"] {
+        border-radius: 18px;
+        overflow: hidden;
+        border: 1px solid rgba(255, 105, 56, 0.45);
+        box-shadow: 0 20px 42px rgba(0, 0, 0, 0.28);
+    }
+
+    /* This targets Folium/Leaflet map tiles and warms them into the red/orange palette.
+       The contrast/saturate settings keep land and sea visibly distinct. */
+    .leaflet-tile-pane img {
+        filter: sepia(82%) hue-rotate(320deg) saturate(1.8) contrast(1.16) brightness(0.82) !important;
+    }
+
+    .leaflet-popup-content-wrapper {
+        background: #4b1b17 !important;
+        color: #f4d8cf !important;
+        border: 1px solid rgba(255, 105, 56, 0.55);
+        border-radius: 13px !important;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.38) !important;
+    }
+
+    .leaflet-popup-content {
+        width: auto !important;
+        min-width: 285px !important;
+        max-width: 520px !important;
+        margin: 14px 16px !important;
+        line-height: 1.45 !important;
+        white-space: nowrap !important;
+        font-family: 'Inter', sans-serif !important;
+        font-size: 13px !important;
+    }
+
+    .leaflet-popup-tip {
+        background: #4b1b17 !important;
     }
 
     @media (max-width: 768px) {
+        .metric-grid {
+            grid-template-columns: 1fr;
+        }
+        .subheader-bar {
+            flex-direction: column;
+            align-items: flex-start;
+        }
         .table-wrapper {
             overflow-x: auto;
             -webkit-overflow-scrolling: touch;
         }
         .custom-table {
-            min-width: 700px;
+            min-width: 880px;
         }
     }
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-# loading DATA
-DATA_URL = (
-    "https://raw.githubusercontent.com/rshaw13/au_bess_map/refs/heads/main/data/latest_bess_data.csv"
-)
+# ---------------- DATA LOADING ----------------
+# Use the GitHub raw CSV in deployment. Keep the local fallback for quick testing.
+DATA_URL = "https://raw.githubusercontent.com/rshaw13/au_bess_map/refs/heads/main/data/latest_bess_data.csv"
+LOCAL_DATA_FILE = Path("data/latest_bess_data.csv")
 
 @st.cache_data(ttl=300)
-def load_data():
-    return pd.read_csv(DATA_URL)
+def load_data() -> pd.DataFrame:
+    if LOCAL_DATA_FILE.exists():
+        return pd.read_csv(LOCAL_DATA_FILE)
+
+    try:
+        return pd.read_csv(DATA_URL)
+    except Exception as e:
+        st.error(
+            "Could not load latest BESS data. Check that data/latest_bess_data.csv exists "
+            "in the GitHub repo and that DATA_URL points to the correct repo, branch and file."
+        )
+        st.code(DATA_URL)
+        st.exception(e)
+        st.stop()
 
 
 df = load_data()
 
-# Defensive cleanup
 if df.empty:
     st.error("No BESS data found. Run update_data.py first and check data/latest_bess_data.csv was created.")
     st.stop()
 
-# title and linkedin caption
+# Defensive column cleanup
+for col in ["SIGNED_MW", "ABS_MW", "MAX_DISCHARGE_MW", "MAX_CHARGE_MW", "STORAGE_MWH", "utilisation_pct", "Latitude", "Longitude"]:
+    if col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+df = df.dropna(subset=["Latitude", "Longitude"])
+
+# Ensure selector options exist before the map is rendered. The selectbox itself is displayed below the map.
+asset_options = sorted(df["asset_label"].dropna().unique())
+if not asset_options:
+    st.error("No valid BESS asset labels found in latest_bess_data.csv.")
+    st.stop()
+
+if "selected_bess_asset" not in st.session_state or st.session_state["selected_bess_asset"] not in asset_options:
+    st.session_state["selected_bess_asset"] = asset_options[0]
+
+selected_label = st.session_state["selected_bess_asset"]
+
+# ---------------- HERO ----------------
 st.markdown(
     """
-    <div class="hero">
-        <h1>Australian BESS Live Dispatch Map</h1>
+    <div class="hero-wrap">
+        <div class="hero">
+            <h1><span class="highlight">Australian</span> BESS<br>live dispatch</h1>
+        </div>
     </div>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 linkedin_url = "https://www.linkedin.com/in/ryan-shaw13/"
 st.markdown(
     f"""
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; color: #0a0a0a; font-size: 0.85rem;">
+    <div class="subheader-bar">
         <div>An energy project by Ryan Shaw.</div>
-        <div style="display: flex; align-items: center; gap: 10px;">
-            <span>Contact me on LinkedIn: </span>
-            <a href="{linkedin_url}" target="_blank">
-                <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/8/81/LinkedIn_icon.svg/250px-LinkedIn_icon.svg.png" width="18px">
-            </a>
+        <div>Contact me on <a href="{linkedin_url}" target="_blank">LinkedIn</a></div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ---------------- TOP SUMMARY BOX ----------------
+charging_mw = df.loc[df["SIGNED_MW"] < -1, "ABS_MW"].sum()
+discharging_mw = df.loc[df["SIGNED_MW"] > 1, "ABS_MW"].sum()
+idle_count = int((df["BESS_STATE"] == "Idle").sum())
+
+st.markdown(
+    f"""
+    <div class="status-panel">
+        <div class="status-title"><span style="color: var(--accent);">Current</span> charge / discharge position</div>
+        <div class="metric-grid">
+            <div class="metric-card">
+                <div class="metric-label">Total discharging</div>
+                <div class="metric-value">{discharging_mw:,.1f} MW</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Total charging</div>
+                <div class="metric-value">{charging_mw:,.1f} MW</div>
+            </div>
+            <div class="metric-card">
+                <div class="metric-label">Idle / near idle assets</div>
+                <div class="metric-value">{idle_count}</div>
+            </div>
         </div>
     </div>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-st.markdown('<p class="custom-text"><strong>Current Battery Dispatch Map</strong></p>', unsafe_allow_html=True)
+# ---------------- MAP ----------------
+def state_colour(state: str, is_selected: bool = False) -> str:
+    if is_selected:
+        return "#ff6938"
+    if state == "Discharging":
+        return "#ff6938"   # orange/red = exporting
+    if state == "Charging":
+        return "#f4d8cf"   # light cream = importing/charging, still inside palette
+    return "#a46a5f"       # muted = idle
 
-# Top-level commercial summary
-charging_mw = df.loc[df["SIGNED_MW"] < -1, "ABS_MW"].sum()
-discharging_mw = df.loc[df["SIGNED_MW"] > 1, "ABS_MW"].sum()
-idle_count = (df["BESS_STATE"] == "Idle").sum()
-
-col1, col2, col3 = st.columns(3)
-col1.metric("Total discharging", f"{discharging_mw:,.1f} MW")
-col2.metric("Total charging", f"{charging_mw:,.1f} MW")
-col3.metric("Idle / near idle assets", f"{idle_count}")
-
-# BESS selector
-selected_label = st.selectbox(
-    "Hover over a battery on the map to find its name, then use the drop-down to select a BESS asset for dispatch information below.",
-    df["asset_label"].sort_values().unique()
-)
-
-selected_row = df[df["asset_label"] == selected_label].iloc[0]
-
-# setting up folium map
 m = folium.Map(
     location=[-30, 145],
     zoom_start=4.5,
     tiles="CartoDB positron",
-    width='100%',
-    height='100%'
+    width="100%",
+    height="100%",
 )
 
-# BESS output is often small relative to capacity, so used a base radius.
-# Marker fill radius = actual abs MW. Ring radius = max discharge capacity.
 scale = 0.10
 min_radius = 4
 
-def state_colour(state: str, is_selected: bool = False) -> str:
-    if is_selected:
-        return "#FC0C3B"
-    if state == "Discharging":
-        return "#ca5e2f"   # orange/red = exporting
-    if state == "Charging":
-        return "#449fba"   # blue = importing/charging
-    return "#808080"       # grey = idle
-
-# BESS markers
 for _, row in df.iterrows():
     is_selected = row["asset_label"] == selected_label
-    marker_radius = max(min_radius, row["ABS_MW"] * scale)
-    capacity_radius = max(min_radius + 2, row["MAX_DISCHARGE_MW"] * scale)
+    marker_radius = max(min_radius, float(row["ABS_MW"] or 0) * scale)
+    capacity_radius = max(min_radius + 2, float(row["MAX_DISCHARGE_MW"] or 0) * scale)
 
-    popup_text = f"""
-        <b>{row['Station Name']}</b><br>
-        DUID: {row['DUID']}<br>
-        Region: {row['Region']}<br>
-        State: {row['BESS_STATE']}<br>
-        Signed dispatch: {row['SIGNED_MW']:.1f} MW<br>
-        Discharge capacity: {row['MAX_DISCHARGE_MW']:.1f} MW<br>
-        Charge capacity: {row['MAX_CHARGE_MW']:.1f} MW<br>
-        Storage: {row['STORAGE_MWH']:.1f} MWh<br>
-        Utilisation: {row['utilisation_pct']:.1f}%
-        """
+    popup_html = f"""
+    <div class="bess-popup">
+        <div style="font-size:15px; font-weight:800; color:#ff6938; margin-bottom:7px;">{row['Station Name']}</div>
+        <div><b>DUID:</b> {row['DUID']}</div>
+        <div><b>Region:</b> {row['Region']}</div>
+        <div><b>State:</b> {row['BESS_STATE']}</div>
+        <div><b>Signed dispatch:</b> {row['SIGNED_MW']:.1f} MW</div>
+        <div><b>Discharge capacity:</b> {row['MAX_DISCHARGE_MW']:.1f} MW</div>
+        <div><b>Charge capacity:</b> {row['MAX_CHARGE_MW']:.1f} MW</div>
+        <div><b>Storage:</b> {row['STORAGE_MWH']:.1f} MWh</div>
+        <div><b>Utilisation:</b> {row['utilisation_pct']:.1f}%</div>
+    </div>
+    """
+    popup = folium.Popup(popup_html, max_width=520, min_width=285)
 
-    # Actual active MW marker
     folium.CircleMarker(
         location=[row["Latitude"], row["Longitude"]],
         radius=marker_radius,
         fill=True,
-        fill_opacity=0.65,
+        fill_opacity=0.75,
         fill_color=state_colour(row["BESS_STATE"], is_selected),
-        color=state_colour(row["BESS_STATE"], is_selected),
-        weight=1,
-        tooltip=row['asset_label'],
-        popup=popup_text,
+        color="#ff6938" if is_selected else state_colour(row["BESS_STATE"], is_selected),
+        weight=2 if is_selected else 1,
+        tooltip=row["asset_label"],
+        popup=popup,
     ).add_to(m)
 
-    # Capacity ring
     folium.CircleMarker(
         location=[row["Latitude"], row["Longitude"]],
         radius=capacity_radius,
-        color="gray",
+        color="#ff6938" if is_selected else "#8e463b",
         weight=1,
         fill=True,
-        fill_opacity=0.18 if is_selected else 0,
-        fill_color="#FC0C3B",
-        tooltip=row['asset_label'],
-        popup=popup_text,
+        fill_opacity=0.12 if is_selected else 0,
+        fill_color="#ff6938",
+        tooltip=row["asset_label"],
+        popup=popup,
     ).add_to(m)
 
-# render map
 map_data = st_folium(
     m,
     width=None,
@@ -234,11 +452,30 @@ map_data = st_folium(
 )
 
 st.caption(
-    f"Last update (Aus Time): {df['SETTLEMENTDATE'].iloc[0]} - latest public AEMO Dispatch_SCADA data can lag real time. "
+    f"Last update (Aus Time): {df['SETTLEMENTDATE'].iloc[0]} — latest public AEMO Dispatch_SCADA data can lag real time. "
     "Positive MW = discharging/exporting; negative MW = charging/importing."
 )
 
-# selection-specific BESS data table
+# ---------------- SELECTOR BELOW MAP ----------------
+st.markdown(
+    """
+    <div class="section-title"><span class="highlight">Select</span> a BESS asset</div>
+    <p class="selector-help">Hover over a battery on the map to find its name, then use the drop-down to view dispatch details in the summary table below.</p>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.selectbox(
+    "Select a BESS asset",
+    asset_options,
+    key="selected_bess_asset",
+    label_visibility="collapsed",
+)
+
+selected_label = st.session_state["selected_bess_asset"]
+selected_row = df[df["asset_label"] == selected_label].iloc[0]
+
+# ---------------- SELECTED ASSET TABLE ----------------
 table_df = pd.DataFrame([{
     "BESS Asset": str(selected_row["Station Name"]),
     "DUID": str(selected_row["DUID"]),
@@ -251,24 +488,23 @@ table_df = pd.DataFrame([{
     "Storage Capacity (MWh)": float(round(selected_row["STORAGE_MWH"], 1)),
     "Utilisation (%)": float(round(selected_row["utilisation_pct"], 0)),
     "Last Update (Aus Time)": str(selected_row["SETTLEMENTDATE"]),
-}])
+}]).astype(object)
 
-table_df = table_df.astype(object)
-table_html = table_df.to_html(index=False, classes='custom-table')
+table_html = table_df.to_html(index=False, classes="custom-table")
 
 st.markdown(
     f"""
     <div class="content-card">
-        <h3 style="color: #31333F;">Selected BESS Asset Details</h3>
+        <div class="section-title" style="margin-top: 0; font-size: 1.9rem;"><span class="highlight">Selected</span> BESS asset details</div>
         <div class="table-wrapper">
             {table_html}
         </div>
     </div>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-# Simple leaderboard to add commercial flavour without changing the data pipeline
+# ---------------- LEADERBOARD ----------------
 leaderboard = df[[
     "asset_label",
     "Region",
@@ -294,10 +530,8 @@ leaderboard = leaderboard.rename(columns={
 
 st.markdown(
     """
-    <div class="content-card">
-        <h3 style="color: #31333F;">Most Active BESS Assets Right Now</h3>
-    </div>
+    <div class="section-title"><span class="highlight">Most active</span> BESS assets right now</div>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 st.dataframe(leaderboard, use_container_width=True, hide_index=True)
