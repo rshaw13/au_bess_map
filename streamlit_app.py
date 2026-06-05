@@ -246,7 +246,11 @@ st.markdown(
         filter: sepia(82%) hue-rotate(320deg) saturate(1.8) contrast(1.16) brightness(0.82) !important;
     }
 
-    .leaflet-popup-content-wrapper {
+    .bess-div-icon {
+    background: transparent !important;
+    border: 0 !important;
+}
+.leaflet-popup-content-wrapper {
         background: #4b1b17 !important;
         color: #f4d8cf !important;
         border: 1px solid rgba(255, 105, 56, 0.55);
@@ -463,27 +467,52 @@ map_css = """
 """
 m.get_root().html.add_child(folium.Element(map_css))
 
-scale = 0.10
-min_radius = 4
+def html_escape(value) -> str:
+    """Tiny HTML escape helper so popup/tooltip text cannot break Folium JavaScript."""
+    import html
+    return html.escape(str(value))
+
+
+def marker_sizes(abs_mw: float, discharge_cap: float) -> tuple[int, int]:
+    """Return visible pixel sizes for the active dot and capacity ring.
+
+    These are deliberately bounded. The earlier CircleMarker layer could be hard to see
+    or fail silently in some Streamlit/Folium iframe renders. DivIcon markers are plain
+    HTML, so they are more reliable on Streamlit Cloud.
+    """
+    dot = int(max(9, min(34, 8 + abs_mw * 0.055)))
+    ring = int(max(dot + 10, min(56, 16 + discharge_cap * 0.045)))
+    return dot, ring
+
+
+marker_count = 0
 
 for _, row in df.iterrows():
+    lat = safe_float(row.get("Latitude"), None)
+    lon = safe_float(row.get("Longitude"), None)
+    if lat is None or lon is None or pd.isna(lat) or pd.isna(lon):
+        continue
+
     is_selected = row["asset_label"] == selected_label
     abs_mw = safe_float(row.get("ABS_MW"), 0.0)
     discharge_cap = safe_float(row.get("MAX_DISCHARGE_MW"), 0.0)
-    marker_radius = max(min_radius, abs_mw * scale)
-    capacity_radius = max(min_radius + 2, discharge_cap * scale)
-
     signed_mw = safe_float(row.get("SIGNED_MW"), 0.0)
     charge_cap = safe_float(row.get("MAX_CHARGE_MW"), 0.0)
     storage_mwh = safe_float(row.get("STORAGE_MWH"), 0.0)
     utilisation = safe_float(row.get("utilisation_pct"), 0.0)
+    state = str(row.get("BESS_STATE", "Idle"))
+
+    dot_size, ring_size = marker_sizes(abs_mw, discharge_cap)
+    dot_colour = state_colour(state, is_selected)
+    ring_colour = "#ff6938" if is_selected else "#d0573c"
+    glow = "0 0 0 4px rgba(255,105,56,0.20), 0 0 22px rgba(255,105,56,0.55)" if is_selected else "0 0 14px rgba(255,105,56,0.25)"
 
     popup_html = f"""
     <div class="bess-popup">
-        <div style="font-size:15px; font-weight:800; color:#ff6938; margin-bottom:7px;">{row['Station Name']}</div>
-        <div><b>DUID:</b> {row['DUID']}</div>
-        <div><b>Region:</b> {row['Region']}</div>
-        <div><b>State:</b> {row['BESS_STATE']}</div>
+        <div style="font-size:15px; font-weight:800; color:#ff6938; margin-bottom:7px;">{html_escape(row['Station Name'])}</div>
+        <div><b>DUID:</b> {html_escape(row['DUID'])}</div>
+        <div><b>Region:</b> {html_escape(row['Region'])}</div>
+        <div><b>State:</b> {html_escape(state)}</div>
         <div><b>Signed dispatch:</b> {signed_mw:.1f} MW</div>
         <div><b>Discharge capacity:</b> {discharge_cap:.1f} MW</div>
         <div><b>Charge capacity:</b> {charge_cap:.1f} MW</div>
@@ -491,31 +520,48 @@ for _, row in df.iterrows():
         <div><b>Utilisation:</b> {utilisation:.1f}%</div>
     </div>
     """
-    popup = folium.Popup(popup_html, max_width=560, min_width=300)
+    popup = folium.Popup(popup_html, max_width=620)
 
-    folium.CircleMarker(
-        location=[row["Latitude"], row["Longitude"]],
-        radius=marker_radius,
-        fill=True,
-        fill_opacity=0.75,
-        fill_color=state_colour(row["BESS_STATE"], is_selected),
-        color="#ff6938" if is_selected else state_colour(row["BESS_STATE"], is_selected),
-        weight=2 if is_selected else 1,
-        tooltip=row["asset_label"],
+    # Reliable visible marker: an HTML ring sized by capacity with a central dot sized by current MW.
+    marker_html = f"""
+    <div style="
+        width:{ring_size}px;
+        height:{ring_size}px;
+        border:2px solid {ring_colour};
+        border-radius:50%;
+        background:rgba(255,105,56,0.08);
+        box-shadow:{glow};
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        box-sizing:border-box;
+    ">
+        <div style="
+            width:{dot_size}px;
+            height:{dot_size}px;
+            border-radius:50%;
+            background:{dot_colour};
+            opacity:0.94;
+            border:1px solid rgba(244,216,207,0.65);
+            box-sizing:border-box;
+        "></div>
+    </div>
+    """
+
+    folium.Marker(
+        location=[lat, lon],
+        tooltip=html_escape(row["asset_label"]),
         popup=popup,
+        icon=folium.DivIcon(
+            html=marker_html,
+            icon_size=(ring_size, ring_size),
+            icon_anchor=(ring_size // 2, ring_size // 2),
+            class_name="bess-div-icon",
+        ),
+        z_index_offset=1000 if is_selected else 0,
     ).add_to(m)
 
-    folium.CircleMarker(
-        location=[row["Latitude"], row["Longitude"]],
-        radius=capacity_radius,
-        color="#ff6938" if is_selected else "#8e463b",
-        weight=1,
-        fill=True,
-        fill_opacity=0.12 if is_selected else 0,
-        fill_color="#ff6938",
-        tooltip=row["asset_label"],
-        popup=popup,
-    ).add_to(m)
+    marker_count += 1
 
 # Keep Australia in view and avoid a blank-looking map if all assets are clustered.
 try:
@@ -528,6 +574,9 @@ except Exception:
 # Render Folium directly as HTML instead of using st_folium.
 # This avoids a common Streamlit Cloud issue where the Leaflet map iframe mounts
 # but stays blank.
+if marker_count == 0:
+    st.warning("No BESS markers were created. Check Latitude/Longitude columns in data/latest_bess_data.csv.")
+
 map_height = 450 if st.session_state.get("is_mobile", False) else 600
 components.html(
     m.get_root().render(),
