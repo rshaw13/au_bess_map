@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import folium
+import altair as alt
 import streamlit.components.v1 as components
 from pathlib import Path
 
@@ -297,7 +298,9 @@ st.markdown(
 # ---------------- DATA LOADING ----------------
 # Use the GitHub raw CSV in deployment. Keep the local fallback for quick testing.
 DATA_URL = "https://raw.githubusercontent.com/rshaw13/au_bess_map/refs/heads/main/data/latest_bess_data.csv"
+HISTORY_URL = "https://raw.githubusercontent.com/rshaw13/au_bess_map/refs/heads/main/data/bess_history_24h.csv"
 LOCAL_DATA_FILE = Path("data/latest_bess_data.csv")
+LOCAL_HISTORY_FILE = Path("data/bess_history_24h.csv")
 
 @st.cache_data(ttl=300)
 def load_data() -> pd.DataFrame:
@@ -314,6 +317,20 @@ def load_data() -> pd.DataFrame:
         st.code(DATA_URL)
         st.exception(e)
         st.stop()
+
+
+@st.cache_data(ttl=300)
+def load_history() -> pd.DataFrame:
+    """Load the rolling 24-hour history file created by update_data.py."""
+    if LOCAL_HISTORY_FILE.exists():
+        return pd.read_csv(LOCAL_HISTORY_FILE)
+
+    try:
+        return pd.read_csv(HISTORY_URL)
+    except Exception:
+        # History will not exist until update_data.py has run at least twice.
+        # Return an empty dataframe rather than breaking the whole app.
+        return pd.DataFrame()
 
 
 df = load_data()
@@ -636,6 +653,101 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# ---------------- SELECTED ASSET 24H CHART ----------------
+history_df = load_history()
+
+st.markdown(
+    """
+    <div class="section-title"><span class="highlight">Last 24 hours</span> selected asset output</div>
+    """,
+    unsafe_allow_html=True,
+)
+
+if history_df.empty:
+    st.info("No 24-hour history file found yet. Run update_data.py on a schedule and the chart will populate as snapshots are cached.")
+else:
+    # Clean and filter history for the currently selected DUID.
+    history_df["SETTLEMENTDATE"] = pd.to_datetime(history_df["SETTLEMENTDATE"], errors="coerce")
+    history_df["SIGNED_MW"] = pd.to_numeric(history_df["SIGNED_MW"], errors="coerce")
+    history_df = history_df.dropna(subset=["SETTLEMENTDATE", "SIGNED_MW", "DUID"])
+
+    selected_duid = str(selected_row["DUID"])
+    asset_history = history_df[history_df["DUID"].astype(str) == selected_duid].copy()
+    asset_history = asset_history.sort_values("SETTLEMENTDATE")
+
+    if asset_history.empty:
+        st.info("No cached history found for this selected asset yet. The chart will appear after update_data.py has captured a few snapshots.")
+    else:
+        newest_time = asset_history["SETTLEMENTDATE"].max()
+        cutoff = newest_time - pd.Timedelta(hours=24)
+        asset_history = asset_history[asset_history["SETTLEMENTDATE"] >= cutoff].copy()
+        asset_history["Output MW"] = asset_history["SIGNED_MW"].round(2)
+        asset_history["Time"] = asset_history["SETTLEMENTDATE"]
+        asset_history["Mode"] = asset_history["Output MW"].apply(
+            lambda x: "Discharging" if x > 1 else "Charging" if x < -1 else "Idle"
+        )
+
+        y_min = min(float(asset_history["Output MW"].min()), 0.0)
+        y_max = max(float(asset_history["Output MW"].max()), 0.0)
+        pad = max((y_max - y_min) * 0.12, 5.0)
+
+        line = alt.Chart(asset_history).mark_line(
+            color="#ff6938",
+            strokeWidth=3,
+            interpolate="monotone",
+        ).encode(
+            x=alt.X("Time:T", title="Time", axis=alt.Axis(labelColor="#d6a095", titleColor="#f4d8cf", gridColor="rgba(255,105,56,0.12)")),
+            y=alt.Y("Output MW:Q", title="Signed output MW", scale=alt.Scale(domain=[y_min - pad, y_max + pad]), axis=alt.Axis(labelColor="#d6a095", titleColor="#f4d8cf", gridColor="rgba(255,105,56,0.16)")),
+            tooltip=[
+                alt.Tooltip("Time:T", title="Time"),
+                alt.Tooltip("Output MW:Q", title="Signed output MW", format=",.1f"),
+                alt.Tooltip("Mode:N", title="Mode"),
+            ],
+        )
+
+        points = alt.Chart(asset_history).mark_circle(
+            color="#f4d8cf",
+            size=48,
+            opacity=0.85,
+        ).encode(
+            x="Time:T",
+            y="Output MW:Q",
+            tooltip=[
+                alt.Tooltip("Time:T", title="Time"),
+                alt.Tooltip("Output MW:Q", title="Signed output MW", format=",.1f"),
+                alt.Tooltip("Mode:N", title="Mode"),
+            ],
+        )
+
+        zero_rule = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(
+            color="#d6a095",
+            opacity=0.55,
+            strokeDash=[5, 5],
+        ).encode(y="y:Q")
+
+        chart = (zero_rule + line + points).properties(
+            height=330,
+            background="rgba(99, 39, 32, 0.86)",
+            title={
+                "text": f"{selected_row['Station Name']} — signed BESS output",
+                "subtitle": "Positive MW = discharging/exporting. Negative MW = charging/importing.",
+                "color": "#f4d8cf",
+                "subtitleColor": "#d6a095",
+                "font": "Inter",
+                "fontSize": 18,
+                "anchor": "start",
+            },
+        ).configure_view(
+            stroke="rgba(255,105,56,0.35)"
+        ).configure_axis(
+            labelFont="Inter",
+            titleFont="Inter",
+            domainColor="rgba(255,105,56,0.30)",
+            tickColor="rgba(255,105,56,0.30)",
+        )
+
+        st.altair_chart(chart, use_container_width=True)
 
 # ---------------- LEADERBOARD ----------------
 leaderboard = df[[

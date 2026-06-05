@@ -11,9 +11,13 @@ from pathlib import Path
 # ---------------- CONFIG ----------------
 SCADA_INDEX_URL = "https://www.nemweb.com.au/REPORTS/CURRENT/Dispatch_SCADA/"
 
+# Keep this file in the repo root, same place your old capacity/coords files lived
 BESS_SPEC_FILE = "full_bess_specifications.csv"
 
+# Keep the same data/ pattern as the wind repo
 OUTPUT_FILE = "data/latest_bess_data.csv"
+HISTORY_FILE = "data/bess_history_24h.csv"
+HISTORY_HOURS = 24
 # ----------------------------------------
 
 
@@ -54,14 +58,14 @@ def get_latest_scada(zip_url: str) -> pd.DataFrame:
 
 
 def classify_bess_state(signed_mw: float) -> str:
+    """
+    Convention used in this app:
+    +ve signed_mw = discharging/exporting to grid
+    -ve signed_mw = charging/importing from grid
 
-    # Convention used in this app:
-    # +ve signed_mw = discharging/exporting to grid
-    # -ve signed_mw = charging/importing from grid
-
-    # For Bidirectional Units, AEMO SCADAVALUE may already be signed.
-    # For legacy Load DUIDs, update_data converts positive load MW to negative signed MW.
-
+    For Bidirectional Units, AEMO SCADAVALUE may already be signed.
+    For legacy Load DUIDs, update_data converts positive load MW to negative signed MW.
+    """
     if signed_mw > 1:
         return "Discharging"
     if signed_mw < -1:
@@ -91,7 +95,8 @@ def build_bess_dataset(scada: pd.DataFrame) -> pd.DataFrame:
 
     bess = bess[keep_cols].copy()
 
-    # filter for BESS assets
+    # Your uploaded CSV is already BESS-only, but this keeps update_data safe
+    # if you later replace it with a broader registration file.
     bess = bess[
         bess["Fuel Source - Primary"].str.contains("Battery", case=False, na=False)
         | bess["Technology Type - Primary"].str.contains("Storage", case=False, na=False)
@@ -135,6 +140,7 @@ def build_bess_dataset(scada: pd.DataFrame) -> pd.DataFrame:
     merged["asset_label"] = merged["Station Name"] + " (" + merged["DUID"] + ")"
     merged["timestamp_utc"] = datetime.utcnow().isoformat()
 
+    # Put the columns you care about first
     preferred = [
         "SETTLEMENTDATE",
         "timestamp_utc",
@@ -159,6 +165,41 @@ def build_bess_dataset(scada: pd.DataFrame) -> pd.DataFrame:
     return merged[preferred + other_cols]
 
 
+def update_24h_history(latest: pd.DataFrame) -> pd.DataFrame:
+    """Append the latest SCADA snapshot to a rolling 24-hour BESS history file.
+
+    This creates/updates data/bess_history_24h.csv. It keeps one row per
+    DUID + SETTLEMENTDATE, then deletes rows older than 24 hours measured from
+    the newest SETTLEMENTDATE in the combined history. Using the newest AEMO
+    timestamp, rather than wall-clock time, makes the cache robust to AEMO data
+    publication lag.
+    """
+    history_path = Path(HISTORY_FILE)
+
+    latest = latest.copy()
+    latest["SETTLEMENTDATE"] = pd.to_datetime(latest["SETTLEMENTDATE"], errors="coerce")
+    latest = latest.dropna(subset=["SETTLEMENTDATE", "DUID"])
+
+    if history_path.exists():
+        existing = pd.read_csv(history_path)
+        existing["SETTLEMENTDATE"] = pd.to_datetime(existing["SETTLEMENTDATE"], errors="coerce")
+        existing = existing.dropna(subset=["SETTLEMENTDATE", "DUID"])
+        history = pd.concat([existing, latest], ignore_index=True)
+    else:
+        history = latest
+
+    # Avoid duplicate snapshots when the updater runs more often than AEMO publishes new SCADA.
+    history = history.drop_duplicates(subset=["DUID", "SETTLEMENTDATE"], keep="last")
+
+    newest_time = history["SETTLEMENTDATE"].max()
+    cutoff = newest_time - pd.Timedelta(hours=HISTORY_HOURS)
+    history = history[history["SETTLEMENTDATE"] >= cutoff].copy()
+
+    history = history.sort_values(["DUID", "SETTLEMENTDATE"])
+    history.to_csv(history_path, index=False)
+    return history
+
+
 def main():
     print("Fetching SCADA...")
     latest_url = get_latest_scada_url()
@@ -171,6 +212,9 @@ def main():
     Path("data").mkdir(parents=True, exist_ok=True)
     final.to_csv(OUTPUT_FILE, index=False)
     print(f"Saved {len(final)} rows → {OUTPUT_FILE}")
+
+    history = update_24h_history(final)
+    print(f"Saved rolling 24h history: {len(history)} rows → {HISTORY_FILE}")
 
 
 if __name__ == "__main__":
