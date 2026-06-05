@@ -299,8 +299,10 @@ st.markdown(
 # Use the GitHub raw CSV in deployment. Keep the local fallback for quick testing.
 DATA_URL = "https://raw.githubusercontent.com/rshaw13/au_bess_map/refs/heads/main/data/latest_bess_data.csv"
 HISTORY_URL = "https://raw.githubusercontent.com/rshaw13/au_bess_map/refs/heads/main/data/bess_history_24h.csv"
+REGIONAL_MARKET_URL = "https://raw.githubusercontent.com/rshaw13/au_bess_map/refs/heads/main/data/regional_market_history_24h.csv"
 LOCAL_DATA_FILE = Path("data/latest_bess_data.csv")
 LOCAL_HISTORY_FILE = Path("data/bess_history_24h.csv")
+LOCAL_REGIONAL_MARKET_FILE = Path("data/regional_market_history_24h.csv")
 
 @st.cache_data(ttl=300)
 def load_data() -> pd.DataFrame:
@@ -333,6 +335,18 @@ def load_history() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=300)
+def load_regional_market_history() -> pd.DataFrame:
+    """Load rolling 24-hour state/region price, demand, renewable and battery charging history."""
+    if LOCAL_REGIONAL_MARKET_FILE.exists():
+        return pd.read_csv(LOCAL_REGIONAL_MARKET_FILE)
+
+    try:
+        return pd.read_csv(REGIONAL_MARKET_URL)
+    except Exception:
+        return pd.DataFrame()
+
+
 df = load_data()
 
 if df.empty:
@@ -340,7 +354,7 @@ if df.empty:
     st.stop()
 
 # Defensive column cleanup
-for col in ["SIGNED_MW", "ABS_MW", "MAX_DISCHARGE_MW", "MAX_CHARGE_MW", "STORAGE_MWH", "utilisation_pct", "Latitude", "Longitude"]:
+for col in ["SIGNED_MW", "ABS_MW", "MAX_DISCHARGE_MW", "MAX_CHARGE_MW", "STORAGE_MWH", "utilisation_pct", "Latitude", "Longitude", "REGION_RRP", "REGION_TOTALDEMAND"]:
     if col in df.columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -517,6 +531,10 @@ for _, row in df.iterrows():
     charge_cap = safe_float(row.get("MAX_CHARGE_MW"), 0.0)
     storage_mwh = safe_float(row.get("STORAGE_MWH"), 0.0)
     utilisation = safe_float(row.get("utilisation_pct"), 0.0)
+    region_rrp = safe_float(row.get("REGION_RRP"), None)
+    region_demand = safe_float(row.get("REGION_TOTALDEMAND"), None)
+    price_text = "n/a" if region_rrp is None or pd.isna(region_rrp) else f"${region_rrp:,.2f}/MWh"
+    demand_text = "n/a" if region_demand is None or pd.isna(region_demand) else f"{region_demand:,.0f} MW"
     state = str(row.get("BESS_STATE", "Idle"))
 
     dot_size, ring_size = marker_sizes(abs_mw, discharge_cap)
@@ -529,6 +547,8 @@ for _, row in df.iterrows():
         <div style="font-size:15px; font-weight:800; color:#ff6938; margin-bottom:7px;">{html_escape(row['Station Name'])}</div>
         <div><b>DUID:</b> {html_escape(row['DUID'])}</div>
         <div><b>Region:</b> {html_escape(row['Region'])}</div>
+        <div><b>Regional price:</b> {html_escape(price_text)}</div>
+        <div><b>Regional demand:</b> {html_escape(demand_text)}</div>
         <div><b>State:</b> {html_escape(state)}</div>
         <div><b>Signed dispatch:</b> {signed_mw:.1f} MW</div>
         <div><b>Discharge capacity:</b> {discharge_cap:.1f} MW</div>
@@ -632,7 +652,8 @@ table_df = pd.DataFrame([{
     "Region": str(selected_row["Region"]),
     "State": str(selected_row["BESS_STATE"]),
     "Signed Dispatch (MW)": float(round(selected_row["SIGNED_MW"], 1)),
-    "Abs Dispatch (MW)": float(round(selected_row["ABS_MW"], 1)),
+    "Regional Price ($/MWh)": None if pd.isna(selected_row.get("REGION_RRP", pd.NA)) else float(round(selected_row["REGION_RRP"], 2)),
+    "Regional Demand (MW)": None if pd.isna(selected_row.get("REGION_TOTALDEMAND", pd.NA)) else float(round(selected_row["REGION_TOTALDEMAND"], 0)),
     "Discharge Capacity (MW)": float(round(selected_row["MAX_DISCHARGE_MW"], 1)),
     "Charge Capacity (MW)": float(round(selected_row["MAX_CHARGE_MW"], 1)),
     "Storage Capacity (MWh)": float(round(selected_row["STORAGE_MWH"], 1)),
@@ -749,26 +770,139 @@ else:
 
         st.altair_chart(chart, use_container_width=True)
 
+# ---------------- REGIONAL 24H RENEWABLE/DEMAND VS BATTERY CHARGING CHART ----------------
+regional_history_df = load_regional_market_history()
+
+st.markdown(
+    """
+    <div class="section-title"><span class="highlight">Renewables vs demand</span> and battery charging</div>
+    """,
+    unsafe_allow_html=True,
+)
+
+if regional_history_df.empty:
+    st.info(
+        "No regional market history file found yet. Run the updated update_data.py so data/regional_market_history_24h.csv is created."
+    )
+else:
+    regional_history_df["SETTLEMENTDATE"] = pd.to_datetime(regional_history_df["SETTLEMENTDATE"], errors="coerce")
+    for col in ["RENEWABLE_DEMAND_DELTA_MW", "BATTERY_CHARGING_MW", "RENEWABLE_GEN_MW", "TOTALDEMAND", "RRP"]:
+        if col in regional_history_df.columns:
+            regional_history_df[col] = pd.to_numeric(regional_history_df[col], errors="coerce")
+
+    regional_history_df = regional_history_df.dropna(subset=["SETTLEMENTDATE", "REGIONID"])
+
+    if regional_history_df.empty or "RENEWABLE_DEMAND_DELTA_MW" not in regional_history_df.columns:
+        st.info("Regional history is present, but it does not yet contain the renewable/demand delta columns. Run the updated updater once.")
+    else:
+        available_regions = sorted(regional_history_df["REGIONID"].dropna().astype(str).unique())
+        selected_asset_region = str(selected_row.get("Region", ""))
+        default_region_index = available_regions.index(selected_asset_region) if selected_asset_region in available_regions else 0
+
+        selected_region_for_chart = st.selectbox(
+            "Select region for renewable/demand vs battery charging chart",
+            available_regions,
+            index=default_region_index,
+        )
+
+        region_chart_df = regional_history_df[
+            regional_history_df["REGIONID"].astype(str) == selected_region_for_chart
+        ].copy()
+        region_chart_df = region_chart_df.sort_values("SETTLEMENTDATE")
+
+        newest_time = region_chart_df["SETTLEMENTDATE"].max()
+        cutoff = newest_time - pd.Timedelta(hours=24)
+        region_chart_df = region_chart_df[region_chart_df["SETTLEMENTDATE"] >= cutoff].copy()
+
+        if region_chart_df.empty:
+            st.info("No cached regional rows found for this region yet.")
+        else:
+            chart_source = region_chart_df[[
+                "SETTLEMENTDATE",
+                "RENEWABLE_DEMAND_DELTA_MW",
+                "BATTERY_CHARGING_MW",
+            ]].copy()
+            chart_source = chart_source.rename(columns={
+                "SETTLEMENTDATE": "Time",
+                "RENEWABLE_DEMAND_DELTA_MW": "Renewables - demand MW",
+                "BATTERY_CHARGING_MW": "Battery charging MW",
+            })
+            chart_long = chart_source.melt(
+                id_vars="Time",
+                var_name="Metric",
+                value_name="MW",
+            ).dropna(subset=["MW"])
+
+            y_min = min(float(chart_long["MW"].min()), 0.0)
+            y_max = max(float(chart_long["MW"].max()), 0.0)
+            pad = max((y_max - y_min) * 0.12, 50.0)
+
+            regional_line = alt.Chart(chart_long).mark_line(
+                strokeWidth=3,
+                interpolate="monotone",
+            ).encode(
+                x=alt.X("Time:T", title="Time", axis=alt.Axis(labelColor="#d6a095", titleColor="#f4d8cf", gridColor="rgba(255,105,56,0.12)")),
+                y=alt.Y("MW:Q", title="MW", scale=alt.Scale(domain=[y_min - pad, y_max + pad]), axis=alt.Axis(labelColor="#d6a095", titleColor="#f4d8cf", gridColor="rgba(255,105,56,0.16)")),
+                color=alt.Color(
+                    "Metric:N",
+                    scale=alt.Scale(range=["#ff6938", "#f4d8cf"]),
+                    legend=alt.Legend(labelColor="#f4d8cf", titleColor="#f4d8cf"),
+                ),
+                tooltip=[
+                    alt.Tooltip("Time:T", title="Time"),
+                    alt.Tooltip("Metric:N", title="Metric"),
+                    alt.Tooltip("MW:Q", title="MW", format=",.1f"),
+                ],
+            )
+
+            zero_rule = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(
+                color="#d6a095",
+                opacity=0.55,
+                strokeDash=[5, 5],
+            ).encode(y="y:Q")
+
+            regional_chart = (zero_rule + regional_line).properties(
+                height=340,
+                background="rgba(99, 39, 32, 0.86)",
+                title={
+                    "text": f"{selected_region_for_chart} — renewable surplus/shortfall vs BESS charging",
+                    "subtitle": "Renewables - demand uses grid-scale SCADA renewables where Full NEM Plant Registration.csv is available. Battery charging is total BESS import MW.",
+                    "color": "#f4d8cf",
+                    "subtitleColor": "#d6a095",
+                    "font": "Inter",
+                    "fontSize": 18,
+                    "anchor": "start",
+                },
+            ).configure_view(
+                stroke="rgba(255,105,56,0.35)"
+            ).configure_axis(
+                labelFont="Inter",
+                titleFont="Inter",
+                domainColor="rgba(255,105,56,0.30)",
+                tickColor="rgba(255,105,56,0.30)",
+            )
+
+            st.altair_chart(regional_chart, use_container_width=True)
+
+
 # ---------------- LEADERBOARD ----------------
 leaderboard = df[[
     "asset_label",
     "Region",
     "BESS_STATE",
     "SIGNED_MW",
-    "ABS_MW",
-    "MAX_DISCHARGE_MW",
-    "MAX_CHARGE_MW",
+    "ABS_MW",  # kept only for sorting, removed before display
+    "REGION_RRP",
     "STORAGE_MWH",
     "utilisation_pct",
 ]].sort_values("ABS_MW", ascending=False).head(10)
 
+leaderboard = leaderboard.drop(columns=["ABS_MW"], errors="ignore")
 leaderboard = leaderboard.rename(columns={
     "asset_label": "Asset",
     "BESS_STATE": "State",
     "SIGNED_MW": "Signed MW",
-    "ABS_MW": "Abs MW",
-    "MAX_DISCHARGE_MW": "Discharge MW",
-    "MAX_CHARGE_MW": "Charge MW",
+    "REGION_RRP": "Regional Price $/MWh",
     "STORAGE_MWH": "Storage MWh",
     "utilisation_pct": "Utilisation %",
 })
